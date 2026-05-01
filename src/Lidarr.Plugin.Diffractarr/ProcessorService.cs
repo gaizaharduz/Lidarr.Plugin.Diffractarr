@@ -71,63 +71,43 @@ namespace Lidarr.Plugin.Diffractarr
 
             if (!hasMultitrack)
             {
+                Logger.Info("No multitrack audio files in folder: {0}", downloadPath);
                 return;
             }
 
             var baseDir = Path.Combine(downloadPath, "diffractarr");
-            try
+
+            foreach (var cueSheet in cueSheets)
             {
-                foreach (var cueSheet in cueSheets)
+                var artist = SanitizeFilename(cueSheet.Artist);
+                var album = SanitizeFilename(cueSheet.Album);
+                var outputDir = Path.Combine(baseDir, artist, album);
+                var success = true;
+
+                foreach (var file in cueSheet.AudioFiles)
                 {
-                    var artist = SanitizeFilename(cueSheet.Artist);
-                    var album = SanitizeFilename(cueSheet.Album);
-                    var outputDir = Path.Combine(baseDir, artist, album);
-
-                    foreach (var file in cueSheet.AudioFiles)
-                    {
-                        FfmpegLock.Wait();
-                        try
-                        {
-                            SplitAudioFile(file, outputDir, settings);
-                        }
-                        finally
-                        {
-                            FfmpegLock.Release();
-                        }
-                    }
-
-                    if (settings.DeleteSource)
-                    {
-                        foreach (var file in cueSheet.AudioFiles)
-                        {
-                            Logger.Info("Deleting audio file: {0}", file.Path);
-                            File.Delete(file.Path);
-                        }
-
-                        Logger.Info("Deleting cue sheet: {0}", cueSheet.Path);
-                        File.Delete(cueSheet.Path);
-                    }
-                }
-            }
-            catch (Exception)
-            {
-                if (settings.CleanOnError)
-                {
+                    FfmpegLock.Wait();
                     try
                     {
-                        Logger.Info("Deleting dir: {0}", baseDir);
-                        if (Directory.Exists(baseDir))
-                        {
-                            Directory.Delete(baseDir, true);
-                        }
+                        success &= SplitAudioFile(file, outputDir, settings);
                     }
-                    catch (Exception ex)
+                    finally
                     {
-                        Logger.Error(ex, "Failed to delete dir: {0}", baseDir);
+                        FfmpegLock.Release();
                     }
                 }
 
-                throw;
+                if (settings.DeleteSource && success)
+                {
+                    foreach (var file in cueSheet.AudioFiles)
+                    {
+                        Logger.Info("Deleting audio file: {0}", file.Path);
+                        File.Delete(file.Path);
+                    }
+
+                    Logger.Info("Deleting cue sheet: {0}", cueSheet.Path);
+                    File.Delete(cueSheet.Path);
+                }
             }
 
             // Hide originals so Lidarr doesn't re-import the unsplit files
@@ -170,7 +150,7 @@ namespace Lidarr.Plugin.Diffractarr
             }
         }
 
-        internal static void SplitAudioFile(AudioFile file, string outputDir, ProcessorSettings settings)
+        internal static bool SplitAudioFile(AudioFile file, string outputDir, ProcessorSettings settings)
         {
             var audioPath = file.Path;
             Logger.Info("Splitting audio file: {0}", audioPath);
@@ -180,44 +160,70 @@ namespace Lidarr.Plugin.Diffractarr
 
             Directory.CreateDirectory(outputDir);
 
-            if (TranscodeExtensions.Contains(ext))
+            var trackPaths = new List<string>();
+            try
             {
-                transcodePath = Path.Combine(
-                    outputDir,
-                    Path.GetFileNameWithoutExtension(audioPath) + ".flac");
-                AudioService.TranscodeToFlac(audioPath, transcodePath);
-                audioPath = transcodePath;
-                ext = ".flac";
-            }
+                if (TranscodeExtensions.Contains(ext))
+                {
+                    transcodePath = Path.Combine(
+                        outputDir,
+                        Path.GetFileNameWithoutExtension(audioPath) + ".flac");
+                    AudioService.TranscodeToFlac(audioPath, transcodePath);
+                    audioPath = transcodePath;
+                    ext = ".flac";
+                }
 
-            int sampleRate = 0;
-            long totalSamples = 0;
-            if (settings.FastCopy && ext.Equals(".flac", StringComparison.OrdinalIgnoreCase))
-            {
-                (sampleRate, totalSamples) = AudioService.ReadFlacSampleInfo(audioPath);
-            }
-
-            foreach (var track in file.Tracks)
-            {
-                var title = SanitizeFilename(track.Title);
-                var trackPath = Path.Combine(outputDir, $"{track.Number:D2}. {title}{ext}");
-
-                AudioService.ExtractTrack(audioPath, trackPath, track, copy: settings.FastCopy);
-
+                int sampleRate = 0;
+                long totalSamples = 0;
                 if (settings.FastCopy && ext.Equals(".flac", StringComparison.OrdinalIgnoreCase))
                 {
-                    var samples = track.Duration.HasValue
-                        ? (long)Math.Round(track.Duration.Value * sampleRate)
-                        : totalSamples - (long)Math.Round(track.Start * sampleRate);
-                    AudioService.FixFlacStreamInfo(trackPath, samples);
+                    (sampleRate, totalSamples) = AudioService.ReadFlacSampleInfo(audioPath);
+                }
+
+                foreach (var track in file.Tracks)
+                {
+                    var title = SanitizeFilename(track.Title);
+                    var trackPath = Path.Combine(outputDir, $"{track.Number:D2}. {title}{ext}");
+
+                    trackPaths.Add(trackPath);
+                    AudioService.ExtractTrack(audioPath, trackPath, track, copy: settings.FastCopy);
+
+                    if (settings.FastCopy && ext.Equals(".flac", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var samples = track.Duration.HasValue
+                            ? (long)Math.Round(track.Duration.Value * sampleRate)
+                            : totalSamples - (long)Math.Round(track.Start * sampleRate);
+                        AudioService.FixFlacStreamInfo(trackPath, samples);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex, "Failed to split audio file: {0}", file.Path);
+                if (settings.CleanOnError)
+                {
+                    foreach (var trackPath in trackPaths)
+                    {
+                        if (File.Exists(trackPath))
+                        {
+                            Logger.Info("Deleting track: {0}", trackPath);
+                            File.Delete(trackPath);
+                        }
+                    }
+                }
+
+                return false;
+            }
+            finally
+            {
+                if (transcodePath != null && File.Exists(transcodePath))
+                {
+                    Logger.Info("Deleting transcode: {0}", transcodePath);
+                    File.Delete(transcodePath);
                 }
             }
 
-            if (transcodePath != null)
-            {
-                Logger.Info("Deleting transcode: {0}", transcodePath);
-                File.Delete(transcodePath);
-            }
+            return true;
         }
 
         internal static string SanitizeFilename(string name)

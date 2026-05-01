@@ -146,12 +146,10 @@ public class ProcessorServiceTests : IDisposable
         TestHelpers.MakeDownload(dlDir);
         File.WriteAllBytes(Path.Combine(dlDir, "album.flac"), new byte[] { 0, 0, 0, 0 });
 
-        Assert.ThrowsAny<Exception>(() =>
-            _processor.ProcessDownload(MakeTrackedDownload(dlDir), _settings));
+        _processor.ProcessDownload(MakeTrackedDownload(dlDir), _settings);
 
-        var diffractarrDir = Path.Combine(dlDir, "diffractarr");
-        Assert.False(Directory.Exists(diffractarrDir));
-        Assert.Empty(_mockService.ImportCalls);
+        var outputDir = Path.Combine(dlDir, "diffractarr", "Test Artist", "Test Album");
+        Assert.False(File.Exists(Path.Combine(outputDir, "01. Track One.flac")));
     }
 
     [Fact]
@@ -162,12 +160,10 @@ public class ProcessorServiceTests : IDisposable
         _settings.CleanOnError = false;
         File.WriteAllBytes(Path.Combine(dlDir, "album.flac"), new byte[] { 0, 0, 0, 0 });
 
-        Assert.ThrowsAny<Exception>(() =>
-            _processor.ProcessDownload(MakeTrackedDownload(dlDir), _settings));
+        _processor.ProcessDownload(MakeTrackedDownload(dlDir), _settings);
 
-        var diffractarrDir = Path.Combine(dlDir, "diffractarr");
-        Assert.True(Directory.Exists(diffractarrDir));
-        Assert.Empty(_mockService.ImportCalls);
+        var outputDir = Path.Combine(dlDir, "diffractarr", "Test Artist", "Test Album");
+        Assert.True(File.Exists(Path.Combine(outputDir, "01. Track One.flac")));
     }
 
     [Fact]
