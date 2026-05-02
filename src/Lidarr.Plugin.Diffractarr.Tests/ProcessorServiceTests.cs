@@ -27,22 +27,22 @@ public class MockCompletedDownloadService : ICompletedDownloadService
 public class ProcessorServiceTests : IDisposable
 {
     private readonly string _tmpDir;
-    private readonly ProcessorSettings _settings;
     private readonly MockCompletedDownloadService _mockService;
+    private readonly ProcessorSettings _settings;
     private readonly ProcessorService _processor;
 
     public ProcessorServiceTests()
     {
         _tmpDir = Path.Combine(Path.GetTempPath(), "diffractarr-test-" + Guid.NewGuid());
         Directory.CreateDirectory(_tmpDir);
+        _mockService = new MockCompletedDownloadService();
         _settings = new ProcessorSettings
         {
             FastCopy = false,
             DeleteSource = false,
             CleanOnError = true,
         };
-        _mockService = new MockCompletedDownloadService();
-        _processor = new ProcessorService(_mockService);
+        _processor = new ProcessorService(_mockService, _settings);
     }
 
     public void Dispose()
@@ -60,7 +60,7 @@ public class ProcessorServiceTests : IDisposable
         TestHelpers.MakeDownload(dlDir);
         var td = MakeTrackedDownload(dlDir);
 
-        _processor.ProcessDownload(td, _settings);
+        _processor.ProcessDownload(td);
 
         var outputDir = Path.Combine(dlDir, "diffractarr", "Test Artist", "Test Album");
         Assert.True(File.Exists(Path.Combine(outputDir, "01. Track One.flac")));
@@ -79,9 +79,10 @@ public class ProcessorServiceTests : IDisposable
     {
         var dlDir = Path.Combine(_tmpDir, "dl");
         TestHelpers.MakeDownload(dlDir);
-        _settings.DeleteSource = true;
 
-        _processor.ProcessDownload(MakeTrackedDownload(dlDir), _settings);
+        _settings.DeleteSource = true;
+        _processor.ProcessDownload(MakeTrackedDownload(dlDir));
+        _settings.DeleteSource = false;
 
         Assert.False(File.Exists(Path.Combine(dlDir, "album.flac")));
         Assert.False(File.Exists(Path.Combine(dlDir, "album.cue")));
@@ -97,7 +98,7 @@ public class ProcessorServiceTests : IDisposable
         Directory.CreateDirectory(dlDir);
         TestHelpers.MakeAudioFile(Path.Combine(dlDir, "album.flac"));
 
-        _processor.ProcessDownload(MakeTrackedDownload(dlDir), _settings);
+        _processor.ProcessDownload(MakeTrackedDownload(dlDir));
 
         Assert.Empty(_mockService.ImportCalls);
     }
@@ -108,7 +109,7 @@ public class ProcessorServiceTests : IDisposable
         var dlDir = Path.Combine(_tmpDir, "dl");
         TestHelpers.MakeDownload(dlDir, tracks: new List<TrackEntry> { new TrackEntry(1, "Only Track", "00:00:00") });
 
-        _processor.ProcessDownload(MakeTrackedDownload(dlDir), _settings);
+        _processor.ProcessDownload(MakeTrackedDownload(dlDir));
 
         Assert.Empty(_mockService.ImportCalls);
     }
@@ -120,21 +121,24 @@ public class ProcessorServiceTests : IDisposable
         Directory.CreateDirectory(dlDir);
         TestHelpers.MakeAudioFile(Path.Combine(dlDir, "disc1.flac"));
         TestHelpers.MakeAudioFile(Path.Combine(dlDir, "disc2.flac"));
-        File.Move(Path.Combine(dlDir, "disc2.flac"), Path.Combine(dlDir, "disc2.ogg"));
+        File.Move(Path.Combine(dlDir, "disc1.flac"), Path.Combine(dlDir, "disc1.ogg"));
 
-        var cueContent = "PERFORMER \"Artist\"\nTITLE \"Album\"\n" +
-            "FILE \"disc1.flac\" WAVE\n" +
-            "  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n" +
-            "  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 01 00:03:00\n" +
-            "FILE \"disc2.ogg\" WAVE\n" +
-            "  TRACK 03 AUDIO\n    TITLE \"Three\"\n    INDEX 01 00:00:00\n" +
-            "  TRACK 04 AUDIO\n    TITLE \"Four\"\n    INDEX 01 00:03:00\n";
+        var cueContent = "PERFORMER \"Test Artist\"\nTITLE \"Test Album\"\n" +
+            "FILE \"disc1.ogg\" WAVE\n" +
+            "  TRACK 01 AUDIO\n    TITLE \"Track One\"\n    INDEX 01 00:00:00\n" +
+            "  TRACK 02 AUDIO\n    TITLE \"Track Two\"\n    INDEX 01 00:03:00\n" +
+            "FILE \"disc2.flac\" WAVE\n" +
+            "  TRACK 03 AUDIO\n    TITLE \"Track Three\"\n    INDEX 01 00:00:00\n" +
+            "  TRACK 04 AUDIO\n    TITLE \"Track Four\"\n    INDEX 01 00:03:00\n";
 
         File.WriteAllText(
             Path.Combine(dlDir, "album.cue"),
             cueContent);
 
-        _processor.ProcessDownload(MakeTrackedDownload(dlDir), _settings);
+        _processor.ProcessDownload(MakeTrackedDownload(dlDir));
+
+        var outputDir = Path.Combine(dlDir, "diffractarr", "Test Artist", "Test Album");
+        Assert.False(Directory.Exists(outputDir));
 
         Assert.Empty(_mockService.ImportCalls);
     }
@@ -146,10 +150,12 @@ public class ProcessorServiceTests : IDisposable
         TestHelpers.MakeDownload(dlDir);
         File.WriteAllBytes(Path.Combine(dlDir, "album.flac"), new byte[] { 0, 0, 0, 0 });
 
-        _processor.ProcessDownload(MakeTrackedDownload(dlDir), _settings);
+        _processor.ProcessDownload(MakeTrackedDownload(dlDir));
 
         var outputDir = Path.Combine(dlDir, "diffractarr", "Test Artist", "Test Album");
-        Assert.False(File.Exists(Path.Combine(outputDir, "01. Track One.flac")));
+        Assert.False(Directory.Exists(outputDir));
+
+        Assert.Empty(_mockService.ImportCalls);
     }
 
     [Fact]
@@ -157,13 +163,16 @@ public class ProcessorServiceTests : IDisposable
     {
         var dlDir = Path.Combine(_tmpDir, "dl");
         TestHelpers.MakeDownload(dlDir);
-        _settings.CleanOnError = false;
         File.WriteAllBytes(Path.Combine(dlDir, "album.flac"), new byte[] { 0, 0, 0, 0 });
 
-        _processor.ProcessDownload(MakeTrackedDownload(dlDir), _settings);
+        _settings.CleanOnError = false;
+        _processor.ProcessDownload(MakeTrackedDownload(dlDir));
+        _settings.CleanOnError = true;
 
         var outputDir = Path.Combine(dlDir, "diffractarr", "Test Artist", "Test Album");
         Assert.True(File.Exists(Path.Combine(outputDir, "01. Track One.flac")));
+
+        Assert.Empty(_mockService.ImportCalls);
     }
 
     [Fact]
@@ -193,7 +202,7 @@ public class ProcessorServiceTests : IDisposable
         };
 
         Assert.ThrowsAny<Exception>(() =>
-            _processor.ProcessDownload(MakeTrackedDownload(dlDir), _settings));
+            _processor.ProcessDownload(MakeTrackedDownload(dlDir)));
 
         // After failure: original restored, backup gone
         Assert.True(File.Exists(audioPath), "Original should be restored after import failure");

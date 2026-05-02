@@ -28,17 +28,18 @@ namespace Lidarr.Plugin.Diffractarr
         };
 
         private readonly ICompletedDownloadService _completedDownloadService;
+        private readonly ProcessorSettings _settings;
 
-        public ProcessorService(ICompletedDownloadService completedDownloadService)
+        public ProcessorService(ICompletedDownloadService completedDownloadService, ProcessorSettings settings)
         {
             _completedDownloadService = completedDownloadService;
+            _settings = settings;
         }
 
-        public void ProcessDownload(TrackedDownload trackedDownload, ProcessorSettings settings)
+        public void ProcessDownload(TrackedDownload trackedDownload)
         {
             var downloadPath = trackedDownload.DownloadItem.OutputPath.FullPath;
 
-            var hasMultitrack = false;
             var cueSheets = new List<CueSheet>();
             var cueFiles = Directory.GetFiles(downloadPath, "*.cue", SearchOption.AllDirectories);
             foreach (var cuePath in cueFiles)
@@ -46,100 +47,49 @@ namespace Lidarr.Plugin.Diffractarr
                 Logger.Info("Parsing cue sheet: {0}", cuePath);
                 var cueSheet = CueSheetService.Parse(cuePath);
                 cueSheets.Add(cueSheet);
-
-                foreach (var file in cueSheet.AudioFiles)
-                {
-                    var ext = Path.GetExtension(file.Path);
-                    if (!SupportedExtensions.Contains(ext))
-                    {
-                        Logger.Warn("Unsupported extension: {0}", file.Path);
-                        return;
-                    }
-
-                    if (file.Tracks.Count > 1)
-                    {
-                        hasMultitrack = true;
-                    }
-
-                    Logger.Debug("  Audio file: {0}", file.Path);
-                    foreach (var track in file.Tracks)
-                    {
-                        Logger.Debug("    Track: {0}", track);
-                    }
-                }
-            }
-
-            if (!hasMultitrack)
-            {
-                Logger.Info("No multitrack audio files in folder: {0}", downloadPath);
-                return;
             }
 
             var baseDir = Path.Combine(downloadPath, "diffractarr");
 
-            foreach (var cueSheet in cueSheets)
+            bool import = false;
+            foreach (var album in cueSheets.GroupBy(cs => (cs.Artist, cs.Album)))
             {
-                var artist = SanitizeFilename(cueSheet.Artist);
-                var album = SanitizeFilename(cueSheet.Album);
-                var outputDir = Path.Combine(baseDir, artist, album);
-                var success = true;
-
-                foreach (var file in cueSheet.AudioFiles)
-                {
-                    FfmpegLock.Wait();
-                    try
-                    {
-                        success &= SplitAudioFile(file, outputDir, settings);
-                    }
-                    finally
-                    {
-                        FfmpegLock.Release();
-                    }
-                }
-
-                if (settings.DeleteSource && success)
-                {
-                    foreach (var file in cueSheet.AudioFiles)
-                    {
-                        Logger.Info("Deleting audio file: {0}", file.Path);
-                        File.Delete(file.Path);
-                    }
-
-                    Logger.Info("Deleting cue sheet: {0}", cueSheet.Path);
-                    File.Delete(cueSheet.Path);
-                }
+                import |= ProcessAlbum(album.ToList(), baseDir);
             }
 
-            // Hide originals so Lidarr doesn't re-import the unsplit files
-            var hiddenFiles = new List<(string original, string backup)>();
-            if (!settings.DeleteSource)
+            if (import)
             {
+                // Hide originals so Lidarr doesn't try to import them again
+                var hiddenFiles = new List<(string original, string backup)>();
                 foreach (var cueSheet in cueSheets)
                 {
-                    foreach (var file in cueSheet.AudioFiles)
+                    foreach (var audioFile in cueSheet.AudioFiles)
                     {
-                        var backup = file.Path + ".bak";
-                        Logger.Debug("Backing up file: {0}", file.Path);
-                        File.Move(file.Path, backup);
-                        hiddenFiles.Add((file.Path, backup));
+                        var backup = audioFile.Path + ".bak";
+                        if (File.Exists(audioFile.Path))
+                        {
+                            Logger.Debug("Backing up audio file: {0}", audioFile.Path);
+                            File.Move(audioFile.Path, backup);
+                            hiddenFiles.Add((audioFile.Path, backup));
+                        }
                     }
                 }
-            }
 
-            try
-            {
-                trackedDownload.State = TrackedDownloadState.ImportPending;
-                _completedDownloadService.Import(trackedDownload);
-            }
-            finally
-            {
-                // Restore originals regardless of import success/failure
-                foreach (var (original, backup) in hiddenFiles)
+                try
                 {
-                    if (File.Exists(backup))
+                    trackedDownload.State = TrackedDownloadState.ImportPending;
+                    _completedDownloadService.Import(trackedDownload);
+                }
+                finally
+                {
+                    // Restore originals regardless of import success/failure
+                    foreach (var (original, backup) in hiddenFiles)
                     {
-                        Logger.Debug("Restoring file: {0}", original);
-                        File.Move(backup, original);
+                        if (File.Exists(backup))
+                        {
+                            Logger.Debug("Restoring audio file: {0}", original);
+                            File.Move(backup, original);
+                        }
                     }
                 }
             }
@@ -150,17 +100,27 @@ namespace Lidarr.Plugin.Diffractarr
             }
         }
 
-        internal static bool SplitAudioFile(AudioFile file, string outputDir, ProcessorSettings settings)
+        internal static bool SplitAudioFile(AudioFile file, string outputDir, bool copy)
         {
             var audioPath = file.Path;
+
+            if (!File.Exists(audioPath))
+            {
+                Logger.Warn("Missing audio file: {0}", audioPath);
+                return false;
+            }
+
+            if (!SupportedExtensions.Contains(Path.GetExtension(audioPath).ToLower()))
+            {
+                Logger.Warn("Unsupported extension: {0}", audioPath);
+                return false;
+            }
+
             Logger.Info("Splitting audio file: {0}", audioPath);
 
             var ext = Path.GetExtension(audioPath);
             string? transcodePath = null;
 
-            Directory.CreateDirectory(outputDir);
-
-            var trackPaths = new List<string>();
             try
             {
                 if (TranscodeExtensions.Contains(ext))
@@ -175,7 +135,7 @@ namespace Lidarr.Plugin.Diffractarr
 
                 int sampleRate = 0;
                 long totalSamples = 0;
-                if (settings.FastCopy && ext.Equals(".flac", StringComparison.OrdinalIgnoreCase))
+                if (copy && ext.Equals(".flac", StringComparison.OrdinalIgnoreCase))
                 {
                     (sampleRate, totalSamples) = AudioService.ReadFlacSampleInfo(audioPath);
                 }
@@ -185,10 +145,9 @@ namespace Lidarr.Plugin.Diffractarr
                     var title = SanitizeFilename(track.Title);
                     var trackPath = Path.Combine(outputDir, $"{track.Number:D2}. {title}{ext}");
 
-                    trackPaths.Add(trackPath);
-                    AudioService.ExtractTrack(audioPath, trackPath, track, copy: settings.FastCopy);
+                    AudioService.ExtractTrack(audioPath, trackPath, track, copy: copy);
 
-                    if (settings.FastCopy && ext.Equals(".flac", StringComparison.OrdinalIgnoreCase))
+                    if (copy && ext.Equals(".flac", StringComparison.OrdinalIgnoreCase))
                     {
                         var samples = track.Duration.HasValue
                             ? (long)Math.Round(track.Duration.Value * sampleRate)
@@ -200,18 +159,6 @@ namespace Lidarr.Plugin.Diffractarr
             catch (Exception ex)
             {
                 Logger.Error(ex, "Failed to split audio file: {0}", file.Path);
-                if (settings.CleanOnError)
-                {
-                    foreach (var trackPath in trackPaths)
-                    {
-                        if (File.Exists(trackPath))
-                        {
-                            Logger.Info("Deleting track: {0}", trackPath);
-                            File.Delete(trackPath);
-                        }
-                    }
-                }
-
                 return false;
             }
             finally
@@ -231,6 +178,61 @@ namespace Lidarr.Plugin.Diffractarr
             name = InvalidCharsRegex().Replace(name, "");
             name = WhitespaceRegex().Replace(name, " ").Trim();
             return name;
+        }
+
+        private bool ProcessAlbum(List<CueSheet> cueSheets, string baseDir)
+        {
+            var artist = cueSheets[0].Artist;
+            var album = cueSheets[0].Album;
+            if (!cueSheets.Any(cs => cs.AudioFiles.Any(af => af.Tracks.Count > 1)))
+            {
+                Logger.Info("No multitrack audio files for album: {0} - {1}", artist, album);
+                return false;
+            }
+
+            var albumDir = Path.Combine(baseDir, SanitizeFilename(artist), SanitizeFilename(album));
+            Directory.CreateDirectory(albumDir);
+            foreach (var cueSheet in cueSheets)
+            {
+                foreach (var audioFile in cueSheet.AudioFiles)
+                {
+                    FfmpegLock.Wait();
+                    try
+                    {
+                        if (!SplitAudioFile(audioFile, albumDir, _settings.FastCopy))
+                        {
+                            if (_settings.CleanOnError)
+                            {
+                                Logger.Info("Deleting album directory: {0}", albumDir);
+                                Directory.Delete(albumDir, recursive: true);
+                            }
+
+                            return false;
+                        }
+                    }
+                    finally
+                    {
+                        FfmpegLock.Release();
+                    }
+                }
+            }
+
+            if (_settings.DeleteSource)
+            {
+                foreach (var cueSheet in cueSheets)
+                {
+                    foreach (var file in cueSheet.AudioFiles)
+                    {
+                        Logger.Info("Deleting audio file: {0}", file.Path);
+                        File.Delete(file.Path);
+                    }
+
+                    Logger.Info("Deleting cue sheet: {0}", cueSheet.Path);
+                    File.Delete(cueSheet.Path);
+                }
+            }
+
+            return true;
         }
 
         private static void PruneEmptyDirs(string path)

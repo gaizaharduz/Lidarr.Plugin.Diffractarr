@@ -66,14 +66,53 @@ public class CueSheetServiceTests : IDisposable
     }
 
     [Fact]
-    public void Parse_ResolvesExtension_WhenCueReferencesWrongExt()
+    public void Parse_ResolvesOriginal_WhenExists()
+    {
+        TestHelpers.MakeAudioFile(Path.Combine(_tmpDir, "exists.flac"));
+        TestHelpers.MakeAudioFile(Path.Combine(_tmpDir, "exists.wav"));
+        TestHelpers.MakeAudioFile(Path.Combine(_tmpDir, "album.flac"));
+
+        var cuePath = WriteCue("""
+            PERFORMER "Artist"
+            TITLE "Album"
+            FILE "exists.flac" WAVE
+              TRACK 01 AUDIO
+                TITLE "One"
+                INDEX 01 00:00:00
+            """);
+
+        var cs = CueSheetService.Parse(cuePath);
+        Assert.EndsWith("exists.flac", cs.AudioFiles[0].Path);
+    }
+
+    [Fact]
+    public void Parse_ResolvesExtension_WhenWrongExtension()
+    {
+        TestHelpers.MakeAudioFile(Path.Combine(_tmpDir, "wrong_ext.flac"));
+        TestHelpers.MakeAudioFile(Path.Combine(_tmpDir, "album.flac"));
+
+        var cuePath = WriteCue("""
+            PERFORMER "Artist"
+            TITLE "Album"
+            FILE "wrong_ext.wav" WAVE
+              TRACK 01 AUDIO
+                TITLE "One"
+                INDEX 01 00:00:00
+            """);
+
+        var cs = CueSheetService.Parse(cuePath);
+        Assert.EndsWith("wrong_ext.flac", cs.AudioFiles[0].Path);
+    }
+
+    [Fact]
+    public void Parse_ResolvesCueStem_WhenWrongStem()
     {
         TestHelpers.MakeAudioFile(Path.Combine(_tmpDir, "album.flac"));
 
         var cuePath = WriteCue("""
             PERFORMER "Artist"
             TITLE "Album"
-            FILE "album.wav" WAVE
+            FILE "wrong_stem.wav" WAVE
               TRACK 01 AUDIO
                 TITLE "One"
                 INDEX 01 00:00:00
@@ -84,36 +123,19 @@ public class CueSheetServiceTests : IDisposable
     }
 
     [Fact]
-    public void Parse_ResolvesCueStem_WhenFileNameDoesNotMatch()
+    public void Parse_ResolvesOriginal_WhenNoAudioFileExists()
     {
-        TestHelpers.MakeAudioFile(Path.Combine(_tmpDir, "album.flac"));
-
         var cuePath = WriteCue("""
             PERFORMER "Artist"
             TITLE "Album"
-            FILE "totally_wrong_name.wav" WAVE
+            FILE "nonexistent.flac" WAVE
               TRACK 01 AUDIO
                 TITLE "One"
                 INDEX 01 00:00:00
             """);
 
         var cs = CueSheetService.Parse(cuePath);
-        Assert.EndsWith("album.flac", cs.AudioFiles[0].Path);
-    }
-
-    [Fact]
-    public void Parse_ThrowsFileNotFound_WhenNoAudioFileExists()
-    {
-        var cuePath = WriteCue("""
-            PERFORMER "Artist"
-            TITLE "Album"
-            FILE "nonexistent.wav" WAVE
-              TRACK 01 AUDIO
-                TITLE "One"
-                INDEX 01 00:00:00
-            """);
-
-        Assert.Throws<FileNotFoundException>(() => CueSheetService.Parse(cuePath));
+        Assert.EndsWith("nonexistent.flac", cs.AudioFiles[0].Path);
     }
 
     [Fact]

@@ -50,8 +50,8 @@ namespace Lidarr.Plugin.Diffractarr
                 CleanOnError = Settings.CleanOnError,
             };
 
-            var processor = new ProcessorService(_completedDownloadService);
-            processor.ProcessDownload(trackedDownload, settings);
+            var processor = new ProcessorService(_completedDownloadService, settings);
+            processor.ProcessDownload(trackedDownload);
         }
     }
 }

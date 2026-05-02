@@ -54,9 +54,11 @@ namespace Lidarr.Plugin.Diffractarr
             var text = encoding.GetString(bytes);
             var lines = text.Split('\n').Select(l => l.TrimEnd('\r')).ToArray();
 
-            var data = new CueSheet { Path = cuePath };
+            var cueDir = Path.GetDirectoryName(cuePath) ?? ".";
+            var cueSheet = new CueSheet { Path = cuePath };
             AudioFile? currentFile = null;
             Track? currentTrack = null;
+            Track? previousTrack = null;
 
             foreach (var line in lines)
             {
@@ -64,42 +66,47 @@ namespace Lidarr.Plugin.Diffractarr
 
                 if (trimmed.StartsWith("PERFORMER ", StringComparison.OrdinalIgnoreCase))
                 {
-                    var value = Unquote(trimmed[10..]);
+                    var performer = Unquote(trimmed[10..]);
                     if (currentTrack != null)
                     {
-                        currentTrack.Artist = value;
+                        currentTrack.Artist = performer;
                     }
                     else
                     {
-                        data.Artist = value;
+                        cueSheet.Artist = performer;
                     }
                 }
                 else if (trimmed.StartsWith("TITLE ", StringComparison.OrdinalIgnoreCase))
                 {
-                    var value = Unquote(trimmed[6..]);
+                    var title = Unquote(trimmed[6..]);
                     if (currentTrack != null)
                     {
-                        currentTrack.Title = value;
+                        currentTrack.Title = title;
                     }
                     else
                     {
-                        data.Album = value;
+                        cueSheet.Album = title;
                     }
                 }
                 else if (trimmed.StartsWith("FILE ", StringComparison.OrdinalIgnoreCase))
                 {
+                    currentFile = null;
                     currentTrack = null;
-                    currentFile = new AudioFile { Path = ParseFilePath(trimmed) };
-                    data.AudioFiles.Add(currentFile);
+                    previousTrack = null;
+
+                    var path = Path.Combine(cueDir, ParseFile(trimmed));
+                    currentFile = new AudioFile { Path = ResolveAudioPath(path, cuePath) };
+                    cueSheet.AudioFiles.Add(currentFile);
                 }
                 else if (trimmed.StartsWith("TRACK ", StringComparison.OrdinalIgnoreCase))
                 {
+                    previousTrack = currentTrack;
                     var parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                     currentTrack = new Track
                     {
                         Number = int.TryParse(parts[1], out var n) ? n : 0,
-                        Artist = data.Artist,
-                        Album = data.Album,
+                        Artist = cueSheet.Artist,
+                        Album = cueSheet.Album,
                     };
                     currentFile?.Tracks.Add(currentTrack);
                 }
@@ -108,24 +115,15 @@ namespace Lidarr.Plugin.Diffractarr
                     if (currentTrack != null)
                     {
                         currentTrack.Start = ParseTimestamp(trimmed[9..]);
+                        if (previousTrack != null)
+                        {
+                            previousTrack.Duration = currentTrack.Start - previousTrack.Start;
+                        }
                     }
                 }
             }
 
-            // Resolve audio file paths and compute durations
-            var cueDir = Path.GetDirectoryName(cuePath) ?? ".";
-            foreach (var file in data.AudioFiles)
-            {
-                file.Path = ResolveAudioPath(
-                    Path.Combine(cueDir, file.Path), cuePath);
-
-                for (int i = 0; i < file.Tracks.Count - 1; i++)
-                {
-                    file.Tracks[i].Duration = file.Tracks[i + 1].Start - file.Tracks[i].Start;
-                }
-            }
-
-            return data;
+            return cueSheet;
         }
 
         private static string ResolveAudioPath(string path, string cuePath)
@@ -159,7 +157,7 @@ namespace Lidarr.Plugin.Diffractarr
                 }
             }
 
-            throw new FileNotFoundException($"Missing audio file: {path}");
+            return path;
         }
 
         private static double ParseTimestamp(string timestamp)
@@ -187,7 +185,7 @@ namespace Lidarr.Plugin.Diffractarr
             return value;
         }
 
-        private static string ParseFilePath(string line)
+        private static string ParseFile(string line)
         {
             // FILE "filename.flac" WAVE
             var start = line.IndexOf('"');

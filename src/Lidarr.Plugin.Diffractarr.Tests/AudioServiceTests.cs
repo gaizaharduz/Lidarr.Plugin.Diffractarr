@@ -51,6 +51,7 @@ public class AudioServiceTests : IDisposable
         var inputSamples = TestHelpers.GetTotalSamples(audioPath);
         var tracks = MakeTracks();
         var outputDir = Path.Combine(_tmpDir, "out");
+        Directory.CreateDirectory(outputDir);
 
         var file = new AudioFile
         {
@@ -58,8 +59,7 @@ public class AudioServiceTests : IDisposable
             Tracks = tracks.ToList(),
         };
 
-        var settings = new ProcessorSettings { FastCopy = fastCopy };
-        ProcessorService.SplitAudioFile(file, outputDir, settings);
+        ProcessorService.SplitAudioFile(file, outputDir, fastCopy);
 
         var outExt = ext == "ape" ? ".flac" : $".{ext}";
         var expectedSamples = inputSamples / 3;
